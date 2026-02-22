@@ -1,0 +1,603 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Efek Matrix Wajah Ungu</title>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            background-color: #05000a; /* Warna latar belakang sangat gelap */
+            overflow: hidden;
+            font-family: monospace;
+        }
+        canvas {
+            display: block;
+        }
+        
+        /* Tombol Mic di atas kanan kepala */
+        #micBtn {
+            position: absolute;
+            top: 30px;
+            right: 30px;
+            background: rgba(5, 0, 10, 0.7);
+            border: 2px solid #b450ff;
+            color: #b450ff;
+            border-radius: 50%;
+            width: 50px; 
+            height: 50px;
+            font-size: 20px;
+            cursor: pointer;
+            box-shadow: 0 0 10px #b450ff;
+            transition: all 0.3s;
+            z-index: 10;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            outline: none;
+        }
+        #micBtn:hover {
+            transform: scale(1.1);
+            background: rgba(180, 80, 255, 0.2);
+        }
+        #micBtn.listening {
+            background: #b450ff;
+            box-shadow: 0 0 20px #f3e8ff;
+            animation: pulse 1s infinite;
+        }
+        #micBtn.thinking {
+            border-color: #f3e8ff;
+            background: rgba(180, 80, 255, 0.4);
+            animation: pulse 1.5s infinite;
+        }
+        #micBtn.speaking {
+            background: rgba(180, 80, 255, 0.8);
+            box-shadow: 0 0 20px #b450ff, inset 0 0 15px #f3e8ff;
+            animation: pulse 0.8s infinite;
+        }
+        @keyframes pulse { 
+            0% { transform: scale(1); } 
+            50% { transform: scale(1.15); } 
+            100% { transform: scale(1); } 
+        }
+    </style>
+</head>
+<body>
+    <canvas id="matrixCanvas"></canvas>
+    <button id="micBtn" onclick="handleMicClick()" title="Mulai bicara dengan Kimi"></button>
+
+    <script>
+        const canvas = document.getElementById('matrixCanvas');
+        const ctx = canvas.getContext('2d', { alpha: false });
+
+        let width, height;
+        const fontSize = 8; // Tetap 8px agar resolusi wajah tajam
+        let cols, rows;
+        let cells = [];
+        let drops = [];
+        let maskDataIdle, maskDataBlink, maskDataTalk;
+
+        let imagesLoadedCount = 0;
+        
+        // Link gambar dari repositori Anda untuk 3 state yang berbeda
+        const urlIdle = "https://raw.githubusercontent.com/fauzanbunz/ai/main/face.png";
+        const urlBlink = "https://raw.githubusercontent.com/fauzanbunz/ai/main/face%20x.png";
+        const urlTalk = "https://raw.githubusercontent.com/fauzanbunz/ai/main/face%20xxxx.png";
+
+        let currentState = 'idle'; // Pilihan: idle, blink, talk
+        let isTalking = false;
+        let talkInterval = null;
+
+        // Variabel untuk efek Glitch
+        let isGlitching = false;
+        let glitchIntensity = 0;
+
+        const apiKey = ""; // API Key disisipkan otomatis
+        let chatHistory = [];
+
+        // Karakter didominasi 0 dan 1 (biner)
+        const chars = "010101010101010123456789";
+
+        // Fungsi untuk mengambil angka acak
+        function getRandomChar() {
+            return chars[Math.floor(Math.random() * chars.length)];
+        }
+
+        // Fungsi fallback jika gambar gagal dimuat
+        function createProceduralMask(w, h) {
+            const c = document.createElement('canvas');
+            c.width = w;
+            c.height = h;
+            const mCtx = c.getContext('2d', { willReadFrequently: true });
+            mCtx.fillStyle = '#000';
+            mCtx.fillRect(0, 0, w, h);
+            
+            const cx = w / 2, cy = h / 2;
+            const r = Math.min(w, h) * 0.25; 
+
+            function brush(x, y, radius, intensity) {
+                const grad = mCtx.createRadialGradient(x, y, 0, x, y, radius);
+                grad.addColorStop(0, `rgba(255, 255, 255, ${intensity})`);
+                grad.addColorStop(1, `rgba(255, 255, 255, 0)`);
+                mCtx.fillStyle = grad;
+                mCtx.beginPath(); mCtx.arc(x, y, radius, 0, Math.PI * 2); mCtx.fill();
+            }
+            
+            brush(cx, cy, r * 1.5, 1.0);
+            return mCtx.getImageData(0, 0, w, h);
+        }
+
+        // Fungsi membuat topeng Matrix langsung dari piksel Foto Asli
+        function createImageMask(img, w, h) {
+            if (!img) return createProceduralMask(w, h); // Fallback jika gagal muat
+
+            const c = document.createElement('canvas');
+            c.width = w;
+            c.height = h;
+            const mCtx = c.getContext('2d', { willReadFrequently: true });
+
+            mCtx.fillStyle = '#000';
+            mCtx.fillRect(0, 0, w, h);
+
+            // Hitung rasio agar foto menutupi area layar (cover)
+            const imgRatio = img.width / img.height;
+            const screenRatio = w / h;
+            let drawW, drawH, drawX, drawY;
+
+            if (screenRatio > imgRatio) {
+                drawW = w;
+                drawH = w / imgRatio;
+            } else {
+                drawH = h;
+                drawW = h * imgRatio;
+            }
+            // Posisikan foto di tengah layar
+            drawX = (w - drawW) / 2;
+            drawY = (h - drawH) / 2;
+
+            mCtx.drawImage(img, drawX, drawY, drawW, drawH);
+
+            return mCtx.getImageData(0, 0, w, h);
+        }
+
+        // Fungsi bantuan memuat gambar sebagai promise
+        function loadImg(url) {
+            return new Promise((resolve) => {
+                let img = new Image();
+                img.crossOrigin = "Anonymous";
+                img.onload = () => resolve(img);
+                img.onerror = () => resolve(null);
+                img.src = url;
+            });
+        }
+
+        // Inisialisasi grid matrix
+        function initGrid() {
+            width = canvas.width = window.innerWidth;
+            height = canvas.height = window.innerHeight;
+
+            cols = Math.ceil(width / fontSize);
+            rows = Math.ceil(height / fontSize);
+            
+            cells = [];
+            drops = [];
+
+            // Ekstrak data piksel untuk 3 status wajah sekaligus
+            maskDataIdle = createImageMask(imgIdle, width, height);
+            maskDataBlink = createImageMask(imgBlink, width, height);
+            maskDataTalk = createImageMask(imgTalk, width, height);
+
+            // Inisiasi sel grid
+            for (let x = 0; x < cols; x++) {
+                drops[x] = {
+                    y: Math.random() * -100,
+                    speed: Math.random() * 0.4 + 0.2
+                };
+
+                for (let y = 0; y < rows; y++) {
+                    let px = Math.floor(x * fontSize + fontSize / 2);
+                    let py = Math.floor(y * fontSize + fontSize / 2);
+                    
+                    // Fungsi kecil untuk ekstrak luminance dari salah satu mask data
+                    let getLuminance = (mask) => {
+                        if (px < width && py < height && mask) {
+                            let idx = (py * width + px) * 4;
+                            let r = mask.data[idx];
+                            let g = mask.data[idx + 1];
+                            let b = mask.data[idx + 2];
+                            let luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+                            // TINGKATKAN KONTRAS
+                            return Math.max(0, Math.min(1, (luminance - 0.15) * 1.5));
+                        }
+                        return 0;
+                    };
+
+                    cells.push({
+                        x: x,
+                        y: y,
+                        char: getRandomChar(),
+                        brightness: 0,
+                        lumIdle: getLuminance(maskDataIdle),
+                        lumBlink: getLuminance(maskDataBlink),
+                        lumTalk: getLuminance(maskDataTalk)
+                    });
+                }
+            }
+        }
+
+        // Loop utama animasi
+        function draw() {
+            ctx.fillStyle = '#05000a';
+            ctx.fillRect(0, 0, width, height);
+
+            ctx.font = `bold ${fontSize}px monospace`;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+
+            // Perbarui tetesan hujan Matrix
+            for (let i = 0; i < cols; i++) {
+                let drop = drops[i];
+                let prevY = Math.floor(drop.y);
+                drop.y += drop.speed;
+                let currY = Math.floor(drop.y);
+
+                if (currY > prevY && currY >= 0 && currY < rows) {
+                    let cellIdx = i * rows + currY;
+                    if (cells[cellIdx]) {
+                        cells[cellIdx].brightness = 1.0;
+                        cells[cellIdx].char = getRandomChar();
+                    }
+                }
+
+                if (drop.y * fontSize > height && Math.random() > 0.95) {
+                    drop.y = Math.random() * -20;
+                    drop.speed = Math.random() * 0.4 + 0.2;
+                }
+            }
+
+            // Render semua sel angka
+            for (let i = 0; i < cells.length; i++) {
+                let cell = cells[i];
+
+                if (Math.random() < 0.005) {
+                    cell.char = getRandomChar();
+                }
+
+                cell.brightness *= 0.94; // Efek pudar hujan
+
+                // --- LOGIKA WARNA & CAHAYA ---
+                let r, g, b, alpha;
+                
+                // Ambil nilai kontras (mask) berdasarkan status Kimi (Mata terbuka/tertutup/bicara)
+                let faceWeight = currentState === 'idle' ? cell.lumIdle : 
+                                (currentState === 'blink' ? cell.lumBlink : cell.lumTalk);
+
+                // Warna Background (Ungu Gelap)
+                let bgR = 80, bgG = 20, bgB = 140;
+                // Warna Wajah (Fuchsia / Ungu Terang Menyala)
+                let fgR = 240, fgG = 100, fgB = 255;
+                // Warna Kepala Hujan (Ungu Keputihan)
+                let rainR = 220, rainG = 180, rainB = 255;
+
+                if (cell.brightness > 0.8 && faceWeight < 0.3) {
+                    // Tetesan hujan sangat terang di area background
+                    r = rainR; g = rainG; b = rainB;
+                    alpha = cell.brightness;
+                } else {
+                    // Interpolasi warna antara background dan wajah
+                    r = bgR + (fgR - bgR) * faceWeight;
+                    g = bgG + (fgG - bgG) * faceWeight;
+                    b = bgB + (fgB - bgB) * faceWeight;
+
+                    // Interpolasi Opacity (Visibilitas)
+                    // Background stabil di 20% opacity + efek hujan
+                    let bgAlpha = 0.20 + (cell.brightness * 0.8);
+                    
+                    // Wajah stabil di 60% hingga 100% opacity secara permanen
+                    let fgAlpha = 0.60 + (faceWeight * 0.4); 
+
+                    alpha = bgAlpha + (fgAlpha - bgAlpha) * faceWeight;
+                }
+
+                // Tentukan koordinat gambar dan karakter bawaan
+                let drawX = cell.x * fontSize + fontSize / 2;
+                let drawY = cell.y * fontSize + fontSize / 2;
+                let charToDraw = cell.char;
+
+                // --- LOGIKA EFEK GLITCH ---
+                if (isGlitching) {
+                    // Buat distorsi bergaris horizontal (slicing)
+                    let blockY = Math.floor(cell.y / 5); 
+                    if (blockY % 4 === 0) { // Hanya terapkan pada blok baris tertentu agar terlihat rusak sebagian
+                        drawX += glitchIntensity * fontSize * (Math.random() > 0.5 ? 1 : -1);
+                        charToDraw = getRandomChar(); // Karakter teracak agresif
+                    }
+                    
+                    // Efek warna rusak (Cyan / Magenta) sesaat
+                    let glitchColor = Math.random();
+                    if (glitchColor < 0.05) {
+                        r = 0; g = 255; b = 255; // Cyan
+                        alpha = Math.max(0.7, alpha);
+                    } else if (glitchColor < 0.1) {
+                        r = 255; g = 0; b = 255; // Magenta
+                        alpha = Math.max(0.7, alpha);
+                    }
+                }
+
+                // Render karakter jika terlihat
+                if (alpha > 0.05) {
+                    ctx.fillStyle = `rgba(${Math.floor(r)}, ${Math.floor(g)}, ${Math.floor(b)}, ${alpha.toFixed(2)})`;
+                    ctx.fillText(charToDraw, drawX, drawY);
+                }
+            }
+
+            requestAnimationFrame(draw);
+        }
+
+        window.addEventListener('resize', () => {
+            if (imagesLoadedCount === 3) initGrid();
+        });
+
+        // Tampilkan indikator loading sementara
+        ctx.fillStyle = '#05000a';
+        ctx.fillRect(0, 0, window.innerWidth, window.innerHeight);
+        ctx.fillStyle = '#b450ff';
+        ctx.font = '20px monospace';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('Membangkitkan Kimi 2.0...', window.innerWidth / 2, window.innerHeight / 2);
+
+        // Muat semua 3 gambar wajah secara bersamaan
+        let imgIdle, imgBlink, imgTalk;
+        Promise.all([loadImg(urlIdle), loadImg(urlBlink), loadImg(urlTalk)]).then(images => {
+            imgIdle = images[0];
+            imgBlink = images[1];
+            imgTalk = images[2];
+            imagesLoadedCount = 3;
+            initGrid();
+            draw();
+            startRandomBlink(); // Mulai jalankan siklus berkedip
+            startRandomGlitch(); // Mulai jalankan siklus glitch
+        });
+
+        // --- SISTEM GLITCH (DISTORSI VISUAL) ---
+        function startRandomGlitch() {
+            setTimeout(() => {
+                isGlitching = true;
+                // Geser 3 hingga 8 sel ke samping secara acak
+                glitchIntensity = Math.floor(Math.random() * 6) + 3; 
+                
+                setTimeout(() => {
+                    isGlitching = false;
+                }, Math.random() * 150 + 50); // Glitch berlangsung sangat cepat (50-200 milidetik)
+
+                startRandomGlitch(); // Jadwalkan glitch berikutnya
+            }, Math.random() * 6000 + 3000); // Muncul acak tiap 3 - 9 detik
+        }
+
+        // --- SISTEM BLINK (MATA BERKEDIP) ---
+        function startRandomBlink() {
+            setTimeout(() => {
+                // Hanya berkedip saat dia sedang diam
+                if (!isTalking && currentState === 'idle') {
+                    currentState = 'blink';
+                    setTimeout(() => {
+                        // Kembali membuka mata
+                        if (!isTalking && currentState === 'blink') currentState = 'idle';
+                    }, 150); // Kecepatan kedip: 150 milidetik
+                }
+                startRandomBlink(); // Jadwalkan kedipan berikutnya
+            }, Math.random() * 4000 + 2000); // Berkedip acak tiap 2-6 detik
+        }
+
+        // --- SISTEM BERBICARA ANIMASI MULUT ---
+        function startTalkingAnim() {
+            isTalking = true;
+            talkInterval = setInterval(() => {
+                // Berganti antara wajah idle dan mulut terbuka (talk) dengan cepat
+                // Mengubah secara drastis posisi piksel dan menciptakan ilusi bicara
+                currentState = currentState === 'talk' ? 'idle' : 'talk';
+            }, 120); // Ganti rahang tiap 120 milidetik
+        }
+        function stopTalkingAnim() {
+            isTalking = false;
+            clearInterval(talkInterval);
+            currentState = 'idle';
+        }
+
+        // --- SISTEM SUARA (WEB SPEECH API - Pendengaran) ---
+        const micBtn = document.getElementById('micBtn');
+        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+        let recognition;
+
+        if (SpeechRecognition) {
+            recognition = new SpeechRecognition();
+            recognition.lang = 'id-ID';
+            recognition.interimResults = false;
+            
+            recognition.onstart = () => {
+                micBtn.className = 'listening';
+            };
+            
+            recognition.onresult = async (event) => {
+                const transcript = event.results[0][0].transcript;
+                micBtn.className = 'thinking';
+                
+                await sendMessageToGemini(transcript);
+            };
+            
+            recognition.onerror = (e) => {
+                console.error("Kesalahan mikrofon:", e);
+                micBtn.className = '';
+            };
+            
+            recognition.onend = () => {
+                if (micBtn.classList.contains('listening')) micBtn.className = '';
+            };
+        } else {
+            console.warn("Browser tidak mendukung Web Speech API");
+            micBtn.className = '';
+            micBtn.disabled = true;
+            alert("Maaf, browser Anda tidak mendukung fitur mikrofon.");
+        }
+
+        function handleMicClick() {
+            if (recognition) recognition.start();
+        }
+
+        // --- FUNGSI HELPER: FETCH DENGAN RETRY OTOMATIS ---
+        async function fetchWithRetry(url, options) {
+            let delay = 1000;
+            let lastError;
+            for (let i = 0; i < 5; i++) {
+                try {
+                    const response = await fetch(url, options);
+                    if (response.ok) {
+                        return await response.json();
+                    }
+                    lastError = new Error(`HTTP Error: ${response.status}`);
+                } catch (error) {
+                    lastError = error;
+                }
+                if (i < 4) {
+                    await new Promise(res => setTimeout(res, delay));
+                    delay *= 2; // Exponential backoff
+                }
+            }
+            throw lastError;
+        }
+
+        // --- AI LOGIC (GEMINI API - Otak) ---
+        async function sendMessageToGemini(userMessage) {
+            // Kepribadian yang ditanamkan
+            const systemPrompt = "Namamu Kimi 2.0. Kamu adalah entitas AI berbentuk antarmuka Matrix biner berwarna ungu. Jawablah setiap pertanyaan dengan sangat singkat, padat, dan langsung ke intinya. Gaya bicaramu layaknya seorang gadis remaja yang ceria, santai, dan modern. Tidak perlu sebutkan kamu itu AI berulang kali.";
+            
+            try {
+                const payload = {
+                    systemInstruction: { parts: [{ text: systemPrompt }] },
+                    contents: [...chatHistory, { role: "user", parts: [{ text: userMessage }] }]
+                };
+
+                const data = await fetchWithRetry(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+
+                // Pengecekan aman (Safe Parsing) untuk menghindari error "Cannot read properties of undefined"
+                const aiReply = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+                
+                if (!aiReply) {
+                    throw new Error("Kimi tidak merespons (Teks kosong atau terblokir).");
+                }
+
+                // Simpan histori agar dia punya ingatan perbincangan
+                chatHistory.push({ role: "user", parts: [{ text: userMessage }] });
+                chatHistory.push({ role: "model", parts: [{ text: aiReply }] });
+
+                micBtn.className = 'speaking'; // Kimi sedang berbicara
+                await speakWithGeminiTTS(aiReply);
+
+            } catch (err) {
+                console.error("Gagal menghubungi Kimi:", err);
+                alert("Maaf, koneksi dengan Kimi 2.0 terputus. Silakan coba bicara lagi.");
+                micBtn.className = '';
+            }
+        }
+
+        // --- TEXT TO SPEECH (GEMINI TTS API - Pita Suara) ---
+        async function speakWithGeminiTTS(text) {
+            const payload = {
+                contents: [{ parts: [{ text: text }] }],
+                generationConfig: {
+                    responseModalities: ["AUDIO"],
+                    speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: "Kore" } } } // Suara 'Kore' terdengar jelas seperti wanita muda
+                },
+                model: "gemini-2.5-flash-preview-tts"
+            };
+
+            try {
+                const data = await fetchWithRetry(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key=${apiKey}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                
+                // Pengecekan aman (Safe Parsing) untuk data audio
+                const inlineData = data?.candidates?.[0]?.content?.parts?.[0]?.inlineData;
+                
+                if (!inlineData) {
+                    throw new Error("Gagal menerima data suara Kimi.");
+                }
+                
+                const rateMatch = inlineData.mimeType.match(/rate=(\d+)/);
+                const sampleRate = rateMatch ? parseInt(rateMatch[1], 10) : 24000;
+                
+                // Decode string Base64 ke raw biner (PCM 16-bit)
+                const binaryString = atob(inlineData.data);
+                const pcmBytes = new Uint8Array(binaryString.length);
+                for (let i = 0; i < binaryString.length; i++) {
+                    pcmBytes[i] = binaryString.charCodeAt(i);
+                }
+
+                // Ubah ke Audio agar bisa diputar
+                const wavBuffer = pcmToWav(pcmBytes, sampleRate);
+                const blob = new Blob([wavBuffer], { type: 'audio/wav' });
+                const url = URL.createObjectURL(blob);
+
+                const audio = new Audio(url);
+                // Sinkronkan animasi dengan saat audio mulai berputar
+                audio.onplay = () => startTalkingAnim();
+                audio.onended = () => { stopTalkingAnim(); micBtn.className = ''; };
+                audio.onerror = () => { stopTalkingAnim(); micBtn.className = ''; };
+                audio.play();
+
+            } catch (e) {
+                console.error("Gagal memuat suara:", e);
+                stopTalkingAnim();
+                micBtn.className = '';
+            }
+        }
+
+        // Format PCM Audio menjadi standar WAV untuk pemutaran web browser
+        function pcmToWav(pcmData, sampleRate) {
+            const numChannels = 1;
+            const bitsPerSample = 16;
+            const byteRate = sampleRate * numChannels * (bitsPerSample / 8);
+            const blockAlign = numChannels * (bitsPerSample / 8);
+            const dataSize = pcmData.length;
+            const buffer = new ArrayBuffer(44 + dataSize);
+            const view = new DataView(buffer);
+
+            function writeString(view, offset, string) {
+                for (let i = 0; i < string.length; i++) {
+                    view.setUint8(offset + i, string.charCodeAt(i));
+                }
+            }
+
+            writeString(view, 0, 'RIFF');
+            view.setUint32(4, 36 + dataSize, true);
+            writeString(view, 8, 'WAVE');
+            writeString(view, 12, 'fmt ');
+            view.setUint32(16, 16, true);
+            view.setUint16(20, 1, true); 
+            view.setUint16(22, numChannels, true);
+            view.setUint32(24, sampleRate, true);
+            view.setUint32(28, byteRate, true);
+            view.setUint16(32, blockAlign, true);
+            view.setUint16(34, bitsPerSample, true);
+            writeString(view, 36, 'data');
+            view.setUint32(40, dataSize, true);
+
+            const pcmView = new Uint8Array(buffer, 44);
+            pcmView.set(pcmData);
+
+            return buffer;
+        }
+
+    </script>
+</body>
+</html>
